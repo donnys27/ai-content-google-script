@@ -65,12 +65,24 @@ function writeEngine5ToSheet() {
 
   if (existingSignature === signature && existingReport.trim() !== '') {
     Logger.log('Engine 5: input Engine 4 tidak berubah. Hasil existing dipertahankan (idempotent).');
+    try {
+      ensureQcDashboardsExist(existingReport, contentOutput);
+    } catch (e) {
+      Logger.log('Ensure QC dashboard skip: ' + e.message);
+    }
     return existingReport;
   }
 
   const report = runEngine5QualityController(businessContext, contentStrategy, contentOutput);
   writeEngineOutput(sheet, 'HASIL ENGINE 5 - QUALITY + DIVERSITY CONTROLLER + AUTO REPAIR', report);
   sheet.getRange(ENGINE5_SIG_CELL).setValue(signature);
+  // Dashboard rapi ditulis di dalam runEngine5QualityController via writeQcDashboards().
+  // Pangggil ulang ensure sebagai pengaman jika controller lama di-cache.
+  try {
+    ensureQcDashboardsExist(report, contentOutput);
+  } catch (e) {
+    Logger.log('Ensure QC dashboard skip: ' + e.message);
+  }
   return report;
 }
 
@@ -181,6 +193,11 @@ function runEngine5QualityController(businessContext, contentStrategy, contentOu
 
   const finalPack = assembleFinalContent(sections, results);
   const manifest = buildManifest(results, campaignStatus, timeoutHit);
+  try {
+    writeQcDashboards(manifest, results, summaryObjs, sections);
+  } catch (e) {
+    Logger.log('QC dashboard gagal ditulis (tidak mengganggu QC utama): ' + e.message);
+  }
   const report = buildReport(results, manifest, campaignStatus, initial, timeoutHit, finalPack);
   return report;
 }
@@ -694,4 +711,334 @@ function buildReport(results, manifest, campaignStatus, initial, timeoutHit, fin
     '='.repeat(56),
     finalPack
   ]).join('\n') + manifestText;
+}
+
+/* =====================================================================
+ * QC DASHBOARD RAPI (tidak mengganggu QUALITY_CONTROL)
+ * Sheet baru read-only view:
+ *  - QC_RAPI           : tabel post-by-post, 1 baris = 1 day
+ *  - QC_FINAL_CONTENT  : tabel konten final, 1 baris = 1 day
+ * Pipeline tidak pernah membaca sheet ini. Aman untuk filter/sort manual.
+ * ===================================================================== */
+
+function getQcViewSheetName() {
+  return (typeof Config !== 'undefined' && Config.QC_VIEW_SHEET) || 'QC_RAPI';
+}
+
+function getQcContentSheetName() {
+  return (typeof Config !== 'undefined' && Config.QC_CONTENT_SHEET) || 'QC_FINAL_CONTENT';
+}
+
+function getQcViewSheet() {
+  const ss = getActiveSpreadsheetOrThrow();
+  const name = getQcViewSheetName();
+  let sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  return sh;
+}
+
+function getQcContentSheet() {
+  const ss = getActiveSpreadsheetOrThrow();
+  const name = getQcContentSheetName();
+  let sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  return sh;
+}
+
+function qcStatusColor(status) {
+  const s = String(status || '').toUpperCase();
+  if (s === 'PASS' || s === 'KEEP' || s === 'READY') return '#d9ead3';
+  if (s === 'REVISE' || s === 'AUTO_REVISE') return '#fff2cc';
+  if (s === 'REJECT' || s === 'AUTO_REGENERATE') return '#f4cccc';
+  return '#fce5cd'; // NEEDS_HUMAN_REVIEW & lainnya
+}
+
+function qcSafeStr(v) {
+  if (v === null || v === undefined) return '';
+  return String(v);
+}
+
+function parseSectionFields(text) {
+  const out = {
+    objective: '',
+    pillar: '',
+    content_type: '',
+    topic: '',
+    angle: '',
+    hook: '',
+    caption: '',
+    cta: '',
+    suggested_visual: '',
+    recommended_format: ''
+  };
+  if (!text) return out;
+  const labelRe = /^\s*(Objective|Pillar|Content Type|Topic|Angle|Hook|Caption|CTA|Suggested Visual|Recommended Format|Format)\s*:\s*(.*)\s*$/i;
+  const norm = function (label) {
+    const l = String(label).toLowerCase().replace(/_/g, ' ').trim();
+    if (l === 'objective') return 'objective';
+    if (l === 'pillar') return 'pillar';
+    if (l === 'content type') return 'content_type';
+    if (l === 'topic') return 'topic';
+    if (l === 'angle') return 'angle';
+    if (l === 'hook') return 'hook';
+    if (l === 'caption') return 'caption';
+    if (l === 'cta') return 'cta';
+    if (l === 'suggested visual') return 'suggested_visual';
+    if (l === 'recommended format' || l === 'format') return 'recommended_format';
+    return null;
+  };
+  let current = null;
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  lines.forEach(function (raw) {
+    const line = String(raw);
+    if (/^\s*#\s*DAY\b/i.test(line)) return;
+    const m = line.match(labelRe);
+    if (m) {
+      const key = norm(m[1]);
+      current = key;
+      const val = (m[2] || '').trim();
+      if (val) {
+        out[key] = out[key] ? out[key] + '\n' + val : val;
+      }
+      return;
+    }
+    if (current && line.trim() !== '') {
+      out[current] = out[current] ? out[current] + '\n' + line.trim() : line.trim();
+    }
+  });
+  return out;
+}
+
+function getFinalContentForDay(day, results, sections) {
+  const r = results ? results[day] : null;
+  if (r && r.revised_content) {
+    const c = r.revised_content;
+    return {
+      objective: qcSafeStr(c.objective),
+      pillar: qcSafeStr(c.pillar),
+      content_type: qcSafeStr(c.content_type),
+      topic: qcSafeStr(c.topic),
+      angle: qcSafeStr(c.angle),
+      hook: qcSafeStr(c.hook),
+      caption: qcSafeStr(c.caption),
+      cta: qcSafeStr(c.cta),
+      suggested_visual: qcSafeStr(c.suggested_visual),
+      recommended_format: qcSafeStr(c.recommended_format || c.format)
+    };
+  }
+  const parsed = parseSectionFields(sections ? sections[day] : '');
+  return {
+    objective: parsed.objective,
+    pillar: parsed.pillar,
+    content_type: parsed.content_type,
+    topic: parsed.topic,
+    angle: parsed.angle,
+    hook: parsed.hook,
+    caption: parsed.caption,
+    cta: parsed.cta,
+    suggested_visual: parsed.suggested_visual,
+    recommended_format: parsed.recommended_format
+  };
+}
+
+function writeQcDashboards(manifest, results, summaryObjs, sections) {
+  if (!manifest || !manifest.overall || !manifest.posts) return;
+  writeQcRapiSheet(manifest, results, summaryObjs);
+  writeQcFinalContentSheet(manifest, results, sections);
+}
+
+function writeQcRapiSheet(manifest, results, summaryObjs) {
+  const sheet = getQcViewSheet();
+  const o = manifest.overall;
+  const days = Object.keys(results || {}).map(Number).sort(function (a, b) { return a - b; });
+
+  const header = ['Day', 'Objective', 'Pillar', 'Content Type', 'Topic', 'Angle', 'Hook', 'CTA', 'Format',
+    'Original', 'Action', 'Attempt', 'Initial Score', 'Final Score', 'Final Status', 'Primary Issue', 'Issues'];
+
+  const rows = days.map(function (day) {
+    const r = results[day] || {};
+    const s = (typeof findSummary === 'function') ? findSummary(summaryObjs || [], day) : null;
+    const primary = (r.diagnosis && r.diagnosis.primary_issue) || '';
+    return [
+      day,
+      (s && s.objective) || '',
+      (s && s.pillar) || '',
+      (s && s.content_type) || '',
+      (s && s.topic) || '',
+      (s && s.angle) || '',
+      (s && s.hook) || '',
+      (s && s.cta) || '',
+      (s && s.format) || '',
+      r.original_status || '',
+      r.action || '',
+      r.attempt || 0,
+      (typeof r.score === 'number' && !isNaN(r.score)) ? r.score : '',
+      (typeof r.final_score === 'number' && !isNaN(r.final_score)) ? r.final_score : '',
+      r.final_status || '',
+      primary,
+      (r.issues || []).join('; ')
+    ];
+  });
+
+  sheet.clear();
+  // Judul + ringkasan (baris 1-2), tabel mulai baris 4 agar header tetap 1 baris utuh.
+  sheet.getRange(1, 1).setValue('QC RAPI — Post-by-Post (view otomatis dari QUALITY_CONTROL, jangan dipakai sebagai input program)');
+  sheet.getRange(2, 1).setValue(
+    'Update: ' + new Date().toLocaleString() +
+    ' | Total: ' + o.total_posts +
+    ' | Passed: ' + o.passed +
+    ' | Auto-Revised: ' + o.auto_revised +
+    ' | Auto-Regenerated: ' + o.auto_regenerated +
+    ' | Needs Human Review: ' + o.needs_human_review +
+    ' | Campaign: ' + o.campaign_status +
+    ' | Timeout: ' + o.timeout_limited
+  );
+  sheet.getRange('1:2').setFontWeight('bold').setBackground('#f3f3f3').setFontSize(10);
+  sheet.getRange(2, 1).setFontWeight('normal');
+
+  const HEADER_ROW = 4;
+  sheet.getRange(HEADER_ROW, 1, 1, header.length).setValues([header])
+    .setFontWeight('bold').setBackground('#1a73e8').setFontColor('#ffffff')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+  sheet.setRowHeight(HEADER_ROW, 30);
+
+  if (rows.length) {
+    sheet.getRange(HEADER_ROW + 1, 1, rows.length, header.length).setValues(rows)
+      .setVerticalAlignment('top').setWrap(true);
+    // Warna status agar mudah scan.
+    const STATUS_COL = 15; // Final Status
+    const bg = rows.map(function (row) {
+      const c = qcStatusColor(row[STATUS_COL - 1]);
+      const line = [];
+      for (let i = 0; i < header.length; i++) line.push(i === STATUS_COL - 1 ? c : '#ffffff');
+      return line;
+    });
+    sheet.getRange(HEADER_ROW + 1, 1, rows.length, header.length).setBackgrounds(bg);
+  }
+
+  const widths = [60, 130, 130, 120, 180, 180, 220, 150, 120, 90, 130, 75, 90, 90, 130, 160, 300];
+  widths.forEach(function (w, i) { sheet.setColumnWidth(i + 1, w); });
+  try { sheet.setFrozenRows(HEADER_ROW); } catch (e) {}
+  try {
+    const existing = sheet.getFilter();
+    if (existing) existing.remove();
+    sheet.getRange(HEADER_ROW, 1, rows.length + 1, header.length).createFilter();
+  } catch (e) {}
+}
+
+function writeQcFinalContentSheet(manifest, results, sections) {
+  const sheet = getQcContentSheet();
+  const days = Object.keys(results || {}).map(Number).sort(function (a, b) { return a - b; });
+
+  const header = ['Day', 'Objective', 'Pillar', 'Content Type', 'Topic', 'Angle', 'Hook', 'Caption', 'CTA',
+    'Suggested Visual', 'Recommended Format', 'Final Status', 'Final Score'];
+
+  const rows = days.map(function (day) {
+    const r = results[day] || {};
+    const c = getFinalContentForDay(day, results, sections);
+    return [
+      day, c.objective, c.pillar, c.content_type, c.topic, c.angle, c.hook, c.caption, c.cta,
+      c.suggested_visual, c.recommended_format, r.final_status || '',
+      (typeof r.final_score === 'number' && !isNaN(r.final_score)) ? r.final_score : ''
+    ];
+  });
+
+  sheet.clear();
+  sheet.getRange(1, 1).setValue('QC FINAL CONTENT — 1 baris = 1 day (hasil repair PASS dipakai, sisanya konten original Engine 4)');
+  sheet.getRange(2, 1).setValue('Update: ' + new Date().toLocaleString() + ' | Total: ' + days.length);
+  sheet.getRange('1:2').setFontWeight('bold').setBackground('#f3f3f3').setFontSize(10);
+  sheet.getRange(2, 1).setFontWeight('normal');
+
+  const HEADER_ROW = 4;
+  sheet.getRange(HEADER_ROW, 1, 1, header.length).setValues([header])
+    .setFontWeight('bold').setBackground('#188038').setFontColor('#ffffff')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+  sheet.setRowHeight(HEADER_ROW, 30);
+
+  if (rows.length) {
+    sheet.getRange(HEADER_ROW + 1, 1, rows.length, header.length).setValues(rows)
+      .setVerticalAlignment('top').setWrap(true);
+    const STATUS_COL = 12;
+    const bg = rows.map(function (row) {
+      const c = qcStatusColor(row[STATUS_COL - 1]);
+      const line = [];
+      for (let i = 0; i < header.length; i++) line.push(i === STATUS_COL - 1 ? c : '#ffffff');
+      return line;
+    });
+    sheet.getRange(HEADER_ROW + 1, 1, rows.length, header.length).setBackgrounds(bg);
+  }
+
+  const widths = [60, 130, 130, 120, 170, 170, 200, 480, 180, 200, 130, 120, 90];
+  widths.forEach(function (w, i) { sheet.setColumnWidth(i + 1, w); });
+  try { sheet.setFrozenRows(HEADER_ROW); } catch (e) {}
+  try {
+    const existing = sheet.getFilter();
+    if (existing) existing.remove();
+    sheet.getRange(HEADER_ROW, 1, rows.length + 1, header.length).createFilter();
+  } catch (e) {}
+}
+
+function ensureQcDashboardsExist(reportText, contentOutputText) {
+  const viewSheet = getQcViewSheet();
+  const contentSheet = getQcContentSheet();
+  const needRebuild = viewSheet.getLastRow() < 5 || contentSheet.getLastRow() < 5;
+  if (!needRebuild) return;
+  const manifest = extractManifestFromReport(reportText);
+  if (!manifest) return;
+  // Rekonstruksi results + summary minimal dari manifest agar tabel tetap bisa ditulis
+  // tanpa mengulang call AI yang mahal.
+  const results = {};
+  const summaryObjs = [];
+  (manifest.posts || []).forEach(function (p) {
+    results[p.day] = {
+      day: p.day,
+      original_status: p.original_status,
+      action: p.action,
+      attempt: p.attempt,
+      score: (typeof p.score === 'number') ? p.score : 0,
+      issues: p.issues || [],
+      diagnosis: p.diagnosis || {},
+      revised_content: p.revised_content || null,
+      qc_after_repair: p.qc_after_repair || null,
+      final_status: p.final_status,
+      final_score: (typeof p.final_score === 'number') ? p.final_score : null
+    };
+    const rc = p.revised_content || {};
+    summaryObjs.push({
+      day: p.day, objective: rc.objective || '', pillar: rc.pillar || '',
+      content_type: rc.content_type || '', topic: rc.topic || '', angle: rc.angle || '',
+      hook: rc.hook || '', cta: rc.cta || '', format: rc.recommended_format || '',
+      status: p.final_status || ''
+    });
+  });
+  const sections = (typeof splitEngine4Sections === 'function' && contentOutputText)
+    ? splitEngine4Sections(contentOutputText) : {};
+  // Lengkapi summary kosong dari sections Engine 4.
+  summaryObjs.forEach(function (s) {
+    if (!s.topic && !s.objective && sections[s.day]) {
+      const f = parseSectionFields(sections[s.day]);
+      s.objective = f.objective; s.pillar = f.pillar; s.content_type = f.content_type;
+      s.topic = f.topic; s.angle = f.angle;
+      if (!s.hook) s.hook = f.hook;
+      if (!s.cta) s.cta = f.cta;
+      if (!s.format) s.format = f.recommended_format;
+    }
+  });
+  writeQcDashboards(manifest, results, summaryObjs, sections);
+}
+
+function extractManifestFromReport(reportText) {
+  try {
+    const t = String(reportText || '');
+    const idx = t.indexOf('=== JSON MANIFEST ===');
+    if (idx === -1) return null;
+    const jsonPart = t.slice(idx + '=== JSON MANIFEST ==='.length).trim();
+    const start = jsonPart.indexOf('{');
+    const end = jsonPart.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    return JSON.parse(jsonPart.slice(start, end + 1));
+  } catch (e) {
+    Logger.log('extractManifest gagal: ' + e.message);
+    return null;
+  }
 }

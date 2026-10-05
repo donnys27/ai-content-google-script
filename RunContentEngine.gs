@@ -219,7 +219,13 @@ function setupWorkbook() {
   getOutputSheet3();
   getOutputSheet4();
   getOutputSheet5();
-  return 'Siap. Isi cell B2:B8 di sheet "' + Config.INPUT_SHEET + '".';
+  try {
+    getQcViewSheet();
+    getQcContentSheet();
+  } catch (e) {
+    Logger.log('Setup QC view skip: ' + e.message);
+  }
+  return 'Siap. Isi cell B2:B8 di sheet "' + Config.INPUT_SHEET + '". Sheet QC_RAPI & QC_FINAL_CONTENT dibuat otomatis setelah Engine 5 jalan.';
 }
 
 function main() {
