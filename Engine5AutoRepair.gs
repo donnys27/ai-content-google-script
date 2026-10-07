@@ -138,6 +138,34 @@ function runEngine5QualityController(businessContext, contentStrategy, contentOu
     };
   });
 
+  // TAHAP 1: tulis tabel awal langsung agar QC_RAPI/QC_FINAL_CONTENT terisi
+  // saat Engine 5 dijalankan, tanpa menunggu auto-repair yang lama.
+  // Ditulis ulang di akhir (tahap final) setelah repair + campaign check.
+  try {
+    var interimResults = {};
+    Object.keys(results).forEach(function (k) {
+      var r = results[k];
+      interimResults[k] = {
+        day: r.day,
+        original_status: r.original_status,
+        action: r.action,
+        attempt: r.attempt || 0,
+        score: r.score,
+        issues: r.issues || [],
+        diagnosis: r.diagnosis || {},
+        revised_content: null,
+        qc_after_repair: null,
+        final_status: r.final_status || r.original_status || 'REVISE',
+        final_score: (typeof r.final_score === 'number') ? r.final_score : (typeof r.score === 'number' ? r.score : null)
+      };
+    });
+    var interimManifest = buildManifest(interimResults, 'IN_PROGRESS', false);
+    writeQcDashboards(interimManifest, interimResults, summaryObjs, sections);
+    Logger.log('QC dashboard tahap awal ditulis (' + evaluations.length + ' hari). Lanjut auto-repair.');
+  } catch (e) {
+    Logger.log('QC dashboard tahap awal gagal (lanjut repair): ' + e.message);
+  }
+
   evaluations.forEach(function (e) {
     if (e.status === 'PASS' || isHumanReviewRoute(e)) return;
     const state = results[e.day];
@@ -195,8 +223,9 @@ function runEngine5QualityController(businessContext, contentStrategy, contentOu
   const manifest = buildManifest(results, campaignStatus, timeoutHit);
   try {
     writeQcDashboards(manifest, results, summaryObjs, sections);
+    Logger.log('QC dashboard tahap final ditulis. Campaign: ' + campaignStatus);
   } catch (e) {
-    Logger.log('QC dashboard gagal ditulis (tidak mengganggu QC utama): ' + e.message);
+    Logger.log('QC dashboard tahap final gagal ditulis (tahap awal tetap ada, tidak mengganggu QC utama): ' + e.message);
   }
   const report = buildReport(results, manifest, campaignStatus, initial, timeoutHit, finalPack);
   return report;
@@ -507,13 +536,15 @@ function buildMatrixEntry(evalInfo) {
 }
 
 function splitEngine4Sections(text) {
-  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
   const map = {};
   let currentDay = null;
   let buffer = [];
-  const dayMarker = /^#\s*DAY\s+(\d+)/i;
+  // Toleran format LLM: "# DAY 1", "## DAY 1", "**DAY 1**", "- Day 1:", "DAY 1 - ...", "DAY: 1"
+  const dayMarker = /^\s*(?:#{1,4}\s*)?(?:[>\-*\u2022]+\s*)?(?:\*{1,2}\s*)?DAY\s*[:\-#]*\s*(\d{1,3})\b/i;
   lines.forEach(function (line) {
-    const m = line.match(dayMarker);
+    const probe = String(line).replace(/\*/g, '').trim();
+    const m = probe.match(dayMarker);
     if (m) {
       if (currentDay !== null) map[currentDay] = buffer.join('\n').trim();
       currentDay = parseInt(m[1], 10);
@@ -758,6 +789,26 @@ function qcSafeStr(v) {
   return String(v);
 }
 
+function qcCleanLineForMatch(raw) {
+  let t = String(raw || '').trim();
+  if (!t) return '';
+  t = t.replace(/^\s*[>\-*\u2022\u25CF\u25AA]+\s+/, '');
+  t = t.replace(/^\s*\d+[.)]\s+/, '');
+  t = t.split('**').join('').split('__').join('');
+  t = t.replace(/^\s*\*\s*/, '').trim();
+  return t;
+}
+
+function qcCleanValue(raw) {
+  let v = String(raw || '').trim();
+  if (!v) return '';
+  v = v.replace(/^\s*[>\-*\u2022\u25CF\u25AA]+\s+/, '');
+  v = v.replace(/^\s*\d+[.)]\s+/, '');
+  v = v.split('**').join('').split('__').join('').trim();
+  v = v.replace(/^\*+\s*/, '').replace(/\s*\*+$/, '').trim();
+  return v;
+}
+
 function parseSectionFields(text) {
   const out = {
     objective: '',
@@ -772,9 +823,12 @@ function parseSectionFields(text) {
     recommended_format: ''
   };
   if (!text) return out;
-  const labelRe = /^\s*(Objective|Pillar|Content Type|Topic|Angle|Hook|Caption|CTA|Suggested Visual|Recommended Format|Format)\s*:\s*(.*)\s*$/i;
+  // Toleran format LLM: "**Objective:** ...", "* Hook: ...", "- Caption: ...", "1. CTA: ...",
+  // "Suggested Visual Direction: ...", "Content-Type: ...", dll.
+  const labelRe = /^(Objective|Pillar|Content[\s\-_]*Type|Topic|Angle|Hook|Caption|CTA|Suggested\s+Visual(?:\s+Direction)?|Visual(?:\s+Direction)?|Recommended\s+Format|Format)\s*:\s*(.*)\s*$/i;
+  const labelOnlyRe = /^(Objective|Pillar|Content[\s\-_]*Type|Topic|Angle|Hook|Caption|CTA|Suggested\s+Visual(?:\s+Direction)?|Visual(?:\s+Direction)?|Recommended\s+Format|Format)\s*$/i;
   const norm = function (label) {
-    const l = String(label).toLowerCase().replace(/_/g, ' ').trim();
+    const l = String(label).toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (l === 'objective') return 'objective';
     if (l === 'pillar') return 'pillar';
     if (l === 'content type') return 'content_type';
@@ -783,27 +837,39 @@ function parseSectionFields(text) {
     if (l === 'hook') return 'hook';
     if (l === 'caption') return 'caption';
     if (l === 'cta') return 'cta';
-    if (l === 'suggested visual') return 'suggested_visual';
+    if (l === 'suggested visual' || l === 'suggested visual direction' || l === 'visual' || l === 'visual direction') return 'suggested_visual';
     if (l === 'recommended format' || l === 'format') return 'recommended_format';
     return null;
   };
+  const dayHeaderRe = /^\s*(?:#{1,4}\s*)?(?:\*{1,2}\s*)?DAY\s*[:\-#]*\s*\d{1,3}\b/i;
   let current = null;
   const lines = String(text).replace(/\r\n/g, '\n').split('\n');
   lines.forEach(function (raw) {
-    const line = String(raw);
-    if (/^\s*#\s*DAY\b/i.test(line)) return;
-    const m = line.match(labelRe);
+    const cleaned = qcCleanLineForMatch(raw);
+    if (!cleaned) return;
+    if (dayHeaderRe.test(cleaned.replace(/\*/g, ''))) { current = null; return; }
+    const m = cleaned.match(labelRe);
     if (m) {
       const key = norm(m[1]);
+      if (!key) return;
       current = key;
-      const val = (m[2] || '').trim();
+      const val = qcCleanValue(m[2] || '');
       if (val) {
         out[key] = out[key] ? out[key] + '\n' + val : val;
       }
       return;
     }
-    if (current && line.trim() !== '') {
-      out[current] = out[current] ? out[current] + '\n' + line.trim() : line.trim();
+    const m2 = cleaned.match(labelOnlyRe);
+    if (m2) {
+      const key2 = norm(m2[1]);
+      if (key2) { current = key2; return; }
+    }
+    if (current && cleaned !== '') {
+      const val2 = qcCleanValue(raw);
+      if (!val2) return;
+      // Hindari menelan baris separator / dekorasi.
+      if (/^=+$/.test(val2) || /^-{3,}$/.test(val2)) return;
+      out[current] = out[current] ? out[current] + '\n' + val2 : val2;
     }
   });
   return out;
@@ -1025,6 +1091,101 @@ function ensureQcDashboardsExist(reportText, contentOutputText) {
     }
   });
   writeQcDashboards(manifest, results, summaryObjs, sections);
+}
+
+function rebuildQcDashboardsForce() {
+  // Rebuild paksa QC_RAPI + QC_FINAL_CONTENT dari data existing
+  // (QUALITY_CONTROL + CONTENT_OUTPUT) tanpa call LLM ulang.
+  // Pakai setelah fix parser, atau jika QC_FINAL_CONTENT hanya terisi Day/Status/Score.
+  const report = readOutputColumn(getOutputSheet5(), Config.OUTPUT_CELL_5);
+  if (!report || !report.trim()) throw new Error('Sheet QUALITY_CONTROL masih kosong. Jalankan Engine 5 dulu.');
+  let contentOutput = '';
+  try {
+    contentOutput = getEngine4Output();
+  } catch (e) {
+    Logger.log('getEngine4Output gagal (lanjut dengan sections kosong): ' + e.message);
+  }
+  const manifest = extractManifestFromReport(report);
+  if (!manifest) throw new Error('Manifest tidak ditemukan di QUALITY_CONTROL. Jalankan ulang Engine 5.');
+  const results = {};
+  const summaryObjs = [];
+  (manifest.posts || []).forEach(function (p) {
+    results[p.day] = {
+      day: p.day,
+      original_status: p.original_status,
+      action: p.action,
+      attempt: p.attempt,
+      score: (typeof p.score === 'number') ? p.score : 0,
+      issues: p.issues || [],
+      diagnosis: p.diagnosis || {},
+      revised_content: p.revised_content || null,
+      qc_after_repair: p.qc_after_repair || null,
+      final_status: p.final_status,
+      final_score: (typeof p.final_score === 'number') ? p.final_score : null
+    };
+    const rc = p.revised_content || {};
+    summaryObjs.push({
+      day: p.day, objective: rc.objective || '', pillar: rc.pillar || '',
+      content_type: rc.content_type || '', topic: rc.topic || '', angle: rc.angle || '',
+      hook: rc.hook || '', cta: rc.cta || '', format: rc.recommended_format || '',
+      status: p.final_status || ''
+    });
+  });
+  const sections = splitEngine4Sections(contentOutput);
+  summaryObjs.forEach(function (s) {
+    if (!s.topic && !s.objective && sections[s.day]) {
+      const f = parseSectionFields(sections[s.day]);
+      s.objective = f.objective; s.pillar = f.pillar; s.content_type = f.content_type;
+      s.topic = f.topic; s.angle = f.angle;
+      if (!s.hook) s.hook = f.hook;
+      if (!s.cta) s.cta = f.cta;
+      if (!s.format) s.format = f.recommended_format;
+    }
+  });
+  writeQcDashboards(manifest, results, summaryObjs, sections);
+  const keys = Object.keys(sections).map(Number).sort(function (a, b) { return a - b; });
+  let empty = 0;
+  keys.forEach(function (d) {
+    const c = getFinalContentForDay(d, results, sections);
+    if (!c.objective && !c.topic && !c.caption) empty += 1;
+  });
+  const msg = 'Rebuild selesai. sections Engine4=' + keys.length + ' [' + keys.slice(0, 10).join(',') + (keys.length > 10 ? '...' : '') + '], hari tanpa konten=' + empty + '. Cek sheet QC_RAPI & QC_FINAL_CONTENT.';
+  Logger.log(msg);
+  return msg;
+}
+
+function debugQcFinalContent() {
+  // Diagnostik: kenapa QC_FINAL_CONTENT hanya terisi Day/Status/Score.
+  // Jalankan via Apps Script > pilih fungsi > Run > lihat Logs.
+  let contentOutput = '';
+  try {
+    contentOutput = getEngine4Output();
+  } catch (e) {
+    return 'Gagal baca CONTENT_OUTPUT: ' + e.message;
+  }
+  const sections = splitEngine4Sections(contentOutput);
+  const keys = Object.keys(sections).map(Number).sort(function (a, b) { return a - b; });
+  Logger.log('CONTENT_OUTPUT len=' + contentOutput.length + ', sections=' + keys.length + ', keys=[' + keys.slice(0, 10).join(',') + ']');
+  Logger.log('Snippet awal CONTENT_OUTPUT (500 char): ' + String(contentOutput).slice(0, 500));
+  const samples = keys.slice(0, 3);
+  if (!samples.length) {
+    Logger.log(' sections KOSONG -> splitEngine4Sections tidak menemukan marker DAY. Cek apakah Engine 4 pakai format "# DAY" / "## DAY".');
+    return 'sections=0. Format DAY marker tidak dikenali. Lihat Logs untuk snippet.';
+  }
+  samples.forEach(function (d) {
+    const raw = String(sections[d] || '').slice(0, 600);
+    const parsed = parseSectionFields(sections[d]);
+    Logger.log('--- DAY ' + d + ' raw ---\n' + raw);
+    Logger.log('--- DAY ' + d + ' parsed ---\n' + JSON.stringify(parsed));
+  });
+  let empty = 0;
+  keys.forEach(function (d) {
+    const p = parseSectionFields(sections[d]);
+    if (!p.objective && !p.topic && !p.caption && !p.hook) empty += 1;
+  });
+  const msg = 'sections=' + keys.length + ', kosong total=' + empty + '. Jika kosong banyak -> format label Engine 4 tidak cocok (mis. **bold**, bullet, atau "Suggested Visual Direction").';
+  Logger.log(msg);
+  return msg;
 }
 
 function extractManifestFromReport(reportText) {
