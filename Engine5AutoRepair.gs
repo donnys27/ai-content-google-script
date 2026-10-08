@@ -537,23 +537,54 @@ function buildMatrixEntry(evalInfo) {
 
 function splitEngine4Sections(text) {
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
-  const map = {};
-  let currentDay = null;
-  let buffer = [];
+
+  const run = function (dayMarker) {
+    const map = {};
+    let currentDay = null;
+    let buffer = [];
+    lines.forEach(function (line) {
+      const probe = String(line).replace(/\*/g, '').trim();
+      const m = probe.match(dayMarker);
+      if (m) {
+        if (currentDay !== null) map[currentDay] = buffer.join('\n').trim();
+        currentDay = parseInt(m[1], 10);
+        buffer = [line];
+      } else if (currentDay !== null) {
+        buffer.push(line);
+      }
+    });
+    if (currentDay !== null) map[currentDay] = buffer.join('\n').trim();
+    return map;
+  };
+
   // Toleran format LLM: "# DAY 1", "## DAY 1", "**DAY 1**", "- Day 1:", "DAY 1 - ...", "DAY: 1"
-  const dayMarker = /^\s*(?:#{1,4}\s*)?(?:[>\-*\u2022]+\s*)?(?:\*{1,2}\s*)?DAY\s*[:\-#]*\s*(\d{1,3})\b/i;
-  lines.forEach(function (line) {
-    const probe = String(line).replace(/\*/g, '').trim();
-    const m = probe.match(dayMarker);
-    if (m) {
+  let map = run(/^\s*(?:#{1,4}\s*)?(?:[>\-*\u2022\u25CF\u25AA]+\s*)?(?:\*{1,2}\s*)?DAY\s*[:\-#]*\s*(\d{1,3})\b/i);
+  if (!Object.keys(map).length) {
+    // Fallback: judul hari bisa ditulis kapital penuh atau preceded by markdown lain.
+    map = run(/^\s*(?:#{1,6}\s*)?(?:[>\-*\u2022\u25CF\u25AA]+\s*)?(?:\*{1,2}\s*)?DAY\s*[:\-#]*\s*(\d{1,3})\b/i);
+  }
+  if (!Object.keys(map).length) {
+    // Fallback terakhir: baris yang memuat kata DAY followed number, di luar tabel markdown.
+    map = {};
+    let currentDay = null;
+    let buffer = [];
+    lines.forEach(function (line) {
+      const probe = String(line).trim();
+      if (!/DAY\s*[:\-#]*\s*\d{1,3}\b/i.test(probe)) return;
+      if (probe.indexOf('|') !== -1) return;
+      const m = probe.match(/DAY\s*[:\-#]*\s*(\d{1,3})\b/i);
+      if (!m) return;
       if (currentDay !== null) map[currentDay] = buffer.join('\n').trim();
       currentDay = parseInt(m[1], 10);
       buffer = [line];
-    } else if (currentDay !== null) {
-      buffer.push(line);
-    }
-  });
-  if (currentDay !== null) map[currentDay] = buffer.join('\n').trim();
+    });
+    if (currentDay !== null) map[currentDay] = buffer.join('\n').trim();
+  }
+  if (!Object.keys(map).length) {
+    Logger.log('splitEngine4Sections: tidak menemukan marker DAY sama sekali. ' +
+      'Engine 4 kemungkinan tidak memakai penanda "# DAY". Cuplikan awal: ' +
+      String(text || '').slice(0, 300));
+  }
   return map;
 }
 
@@ -875,11 +906,18 @@ function parseSectionFields(text) {
   return out;
 }
 
-function getFinalContentForDay(day, results, sections) {
-  const r = results ? results[day] : null;
-  if (r && r.revised_content) {
-    const c = r.revised_content;
+function getFinalContentForDay(day, results, sections, summaryObjs) {
+  const pick = function (primary, fallback) {
+    const a = qcSafeStr(primary).trim();
+    if (a) return a;
+    return qcSafeStr(fallback).trim();
+  };
+
+  // Prioritas 1: hasil repair/regenerate Engine 5.
+  if (results && results[day] && results[day].revised_content) {
+    const c = results[day].revised_content;
     return {
+      source: 'REPAIR',
       objective: qcSafeStr(c.objective),
       pillar: qcSafeStr(c.pillar),
       content_type: qcSafeStr(c.content_type),
@@ -892,25 +930,31 @@ function getFinalContentForDay(day, results, sections) {
       recommended_format: qcSafeStr(c.recommended_format || c.format)
     };
   }
+
+  // Prioritas 2: caption asli Engine 4 (diparse per-day).
   const parsed = parseSectionFields(sections ? sections[day] : '');
+  // Prioritas 3: ringkasan dari Initial QC LLM (selalu tersedia di QC_RAPI).
+  const s = (typeof findSummary === 'function') ? findSummary(summaryObjs || [], day) : null;
+
   return {
-    objective: parsed.objective,
-    pillar: parsed.pillar,
-    content_type: parsed.content_type,
-    topic: parsed.topic,
-    angle: parsed.angle,
-    hook: parsed.hook,
-    caption: parsed.caption,
-    cta: parsed.cta,
-    suggested_visual: parsed.suggested_visual,
-    recommended_format: parsed.recommended_format
+    source: parsed.caption ? 'ENGINE_4' : (s ? 'QC_SUMMARY' : 'KOSONG'),
+    objective: pick(parsed.objective, s && s.objective),
+    pillar: pick(parsed.pillar, s && s.pillar),
+    content_type: pick(parsed.content_type, s && s.content_type),
+    topic: pick(parsed.topic, s && s.topic),
+    angle: pick(parsed.angle, s && s.angle),
+    hook: pick(parsed.hook, s && s.hook),
+    caption: pick(parsed.caption, s && s.caption),
+    cta: pick(parsed.cta, s && s.cta),
+    suggested_visual: qcSafeStr(parsed.suggested_visual),
+    recommended_format: pick(parsed.recommended_format, s && s.format)
   };
 }
 
 function writeQcDashboards(manifest, results, summaryObjs, sections) {
   if (!manifest || !manifest.overall || !manifest.posts) return;
   writeQcRapiSheet(manifest, results, summaryObjs);
-  writeQcFinalContentSheet(manifest, results, sections);
+  writeQcFinalContentSheet(manifest, results, sections, summaryObjs);
 }
 
 function writeQcRapiSheet(manifest, results, summaryObjs) {
@@ -992,26 +1036,42 @@ function writeQcRapiSheet(manifest, results, summaryObjs) {
   } catch (e) {}
 }
 
-function writeQcFinalContentSheet(manifest, results, sections) {
+function writeQcFinalContentSheet(manifest, results, sections, summaryObjs) {
   const sheet = getQcContentSheet();
   const days = Object.keys(results || {}).map(Number).sort(function (a, b) { return a - b; });
 
-  const header = ['Day', 'Objective', 'Pillar', 'Content Type', 'Topic', 'Angle', 'Hook', 'Caption', 'CTA',
-    'Suggested Visual', 'Recommended Format', 'Final Status', 'Final Score'];
+  // Struktur sama seperti QC_RAPI (kolom proses QC ikut), ditambah kolom Caption.
+  // Kolom Final Status / Final Score sengaja tidak ada: sheet ini untuk konten final.
+  const header = ['Day', 'Objective', 'Pillar', 'Content Type', 'Topic', 'Angle', 'Hook', 'Caption', 'CTA', 'Format',
+    'Original', 'Action', 'Attempt', 'Initial Score', 'Primary Issue', 'Issues'];
 
+  let captionFilled = 0;
   const rows = days.map(function (day) {
     const r = results[day] || {};
-    const c = getFinalContentForDay(day, results, sections);
+    const c = getFinalContentForDay(day, results, sections, summaryObjs);
+    const primary = (r.diagnosis && r.diagnosis.primary_issue) || '';
+    if (qcSafeStr(c.caption).trim()) captionFilled += 1;
     return [
-      day, c.objective, c.pillar, c.content_type, c.topic, c.angle, c.hook, c.caption, c.cta,
-      c.suggested_visual, c.recommended_format, r.final_status || '',
-      (typeof r.final_score === 'number' && !isNaN(r.final_score)) ? r.final_score : ''
+      day,
+      c.objective, c.pillar, c.content_type, c.topic, c.angle, c.hook, c.caption, c.cta,
+      c.recommended_format,
+      r.original_status || '',
+      r.action || '',
+      r.attempt || 0,
+      (typeof r.score === 'number' && !isNaN(r.score)) ? r.score : '',
+      primary,
+      (r.issues || []).join('; ')
     ];
   });
 
   sheet.clear();
-  sheet.getRange(1, 1).setValue('QC FINAL CONTENT — 1 baris = 1 day (hasil repair PASS dipakai, sisanya konten original Engine 4)');
-  sheet.getRange(2, 1).setValue('Update: ' + new Date().toLocaleString() + ' | Total: ' + days.length);
+  sheet.getRange(1, 1).setValue('QC FINAL CONTENT — 1 baris = 1 day (kolom proses QC sama seperti QC_RAPI, tanpa Final Status/Score)');
+  sheet.getRange(2, 1).setValue(
+    'Update: ' + new Date().toLocaleString() +
+    ' | Total: ' + days.length +
+    ' | Caption terisi: ' + captionFilled + '/' + days.length +
+    ' | Sumber: REPAIR (hasil auto-repair) > ENGINE_4 (asli) > QC_SUMMARY (ringkasan QC)'
+  );
   sheet.getRange('1:2').setFontWeight('bold').setBackground('#f3f3f3').setFontSize(10);
   sheet.getRange(2, 1).setFontWeight('normal');
 
@@ -1024,17 +1084,20 @@ function writeQcFinalContentSheet(manifest, results, sections) {
   if (rows.length) {
     sheet.getRange(HEADER_ROW + 1, 1, rows.length, header.length).setValues(rows)
       .setVerticalAlignment('top').setWrap(true);
-    const STATUS_COL = 12;
+    // Sorot baris yang caption-nya kosong agar langsung terlihat.
+    const CAPTION_COL = 8;
     const bg = rows.map(function (row) {
-      const c = qcStatusColor(row[STATUS_COL - 1]);
+      const filled = qcSafeStr(row[CAPTION_COL - 1]).trim() !== '';
       const line = [];
-      for (let i = 0; i < header.length; i++) line.push(i === STATUS_COL - 1 ? c : '#ffffff');
+      for (let i = 0; i < header.length; i++) {
+        line.push(i === CAPTION_COL - 1 && !filled ? '#fce5cd' : '#ffffff');
+      }
       return line;
     });
     sheet.getRange(HEADER_ROW + 1, 1, rows.length, header.length).setBackgrounds(bg);
   }
 
-  const widths = [60, 130, 130, 120, 170, 170, 200, 480, 180, 200, 130, 120, 90];
+  const widths = [60, 130, 130, 120, 170, 170, 200, 480, 180, 120, 90, 130, 75, 90, 160, 300];
   widths.forEach(function (w, i) { sheet.setColumnWidth(i + 1, w); });
   try { sheet.setFrozenRows(HEADER_ROW); } catch (e) {}
   try {
@@ -1042,6 +1105,14 @@ function writeQcFinalContentSheet(manifest, results, sections) {
     if (existing) existing.remove();
     sheet.getRange(HEADER_ROW, 1, rows.length + 1, header.length).createFilter();
   } catch (e) {}
+
+  if (captionFilled < days.length) {
+    Logger.log('QC_FINAL_CONTENT: caption terisi ' + captionFilled + '/' + days.length +
+      '. Hari tanpa caption: ' + days.filter(function (d) {
+        var c = getFinalContentForDay(d, results, sections, summaryObjs);
+        return !qcSafeStr(c.caption).trim();
+      }).join(', '));
+  }
 }
 
 function ensureQcDashboardsExist(reportText, contentOutputText) {
@@ -1144,12 +1215,17 @@ function rebuildQcDashboardsForce() {
   });
   writeQcDashboards(manifest, results, summaryObjs, sections);
   const keys = Object.keys(sections).map(Number).sort(function (a, b) { return a - b; });
-  let empty = 0;
-  keys.forEach(function (d) {
-    const c = getFinalContentForDay(d, results, sections);
-    if (!c.objective && !c.topic && !c.caption) empty += 1;
+  const days = Object.keys(results).map(Number).sort(function (a, b) { return a - b; });
+  const withCaption = days.filter(function (d) {
+    const c = getFinalContentForDay(d, results, sections, summaryObjs);
+    return qcSafeStr(c.caption).trim() !== '';
   });
-  const msg = 'Rebuild selesai. sections Engine4=' + keys.length + ' [' + keys.slice(0, 10).join(',') + (keys.length > 10 ? '...' : '') + '], hari tanpa konten=' + empty + '. Cek sheet QC_RAPI & QC_FINAL_CONTENT.';
+  const missingCaption = days.filter(function (d) { return withCaption.indexOf(d) === -1; });
+  const msg = 'Rebuild selesai. days=' + days.length +
+    ' | sections Engine4=' + keys.length +
+    ' | caption terisi=' + withCaption.length + '/' + days.length +
+    ' | caption kosong di day: ' + (missingCaption.length ? missingCaption.join(',') : '(tidak ada)') +
+    '. Cek sheet QC_RAPI & QC_FINAL_CONTENT.';
   Logger.log(msg);
   return msg;
 }
