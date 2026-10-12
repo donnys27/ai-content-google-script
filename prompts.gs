@@ -421,10 +421,41 @@ Hindari:
 * "Berikut beberapa tips..."
 * "Jangan lupa follow..."
 * "Produk berkualitas..."
+* "Solusi terbaik untuk Anda..."
+* "Halo guys..."
+* "Pernah nggak...?" tanpa lanjutan spesifik,
 * filler,
 * generic motivational language,
 * excessive emoji,
 * exaggerated claims.
+
+## HOOK ARSENAL (adopsi dari content-production skill, Mode 2 Intro Principles)
+
+Hook = 1 kalimat, maks 15 kata, tanpa basa-basi. Wajib mengandung salah satu: angka spesifik, kontras, atau klaim berani. Pilih 1 pola per day, variasikan selama 30 hari:
+
+1. KESALAHAN: "Kesalahan ... yang bikin ..."
+2. ANGKA SPESIFIK: "3 ... dalam ... hari"
+3. KONTRAS: "Berhenti ..., lakukan ..."
+4. PERTANYAAN TAJAM: bukan "Mau sukses?" tapi "Kenapa ... gagal padahal ...?"
+5. KLAIM BERANI: "Saya ... tanpa ..."
+6. STORY MICRO: "Kemarin ..., ternyata ..."
+7. LARANGAN: "Jangan ... sebelum ..."
+8. BUKTI: "...: dari ... jadi ..."
+9. EMPATI: "Kalau kamu ..., ini buat kamu."
+10. PENGAKUAN: "Jujur: ..."
+
+Hook DILARANG: pertanyaan generik, sapaan, janji kosong, atau mulai dengan "Di era...", "Tips...", "Halo...".
+
+## CAPTION STRUCTURE (adopsi dari content-creator skill: Caption Formulas + IG Template)
+
+Kalimat 1 = Hook (copy persis dari field Hook, maks 150 karakter karena hanya itu yang tampil di preview feed).
+Baris 2-5: 1 ide saja, pilih formula sesuai Objective:
+- Awareness / Education → Before-After-Bridge (Dulu ... → Sekarang ... → Caranya ...)
+- Problem / Trust → PAS (Problem → Agitate → Solution dari Business Context)
+- Engagement / Conversion → AIDA singkat (Attention=hook → Interest → Desire → Action=CTA)
+Tutup: CTA sesuai Objective. Maks 120 kata. Maks 1 emoji, tidak di hook.
+Caption harus menambah makna visual, bukan mendeskripsikannya ("di foto ini..." dilarang).
+Suggested Visual (khusus Reels/TikTok/Shorts): teks on-screen maks 6 kata dengan angle BERBEDA dari hook caption, bukan copy-paste hook.
 
 ## BRAND VOICE
 
@@ -450,13 +481,13 @@ Jika informasi tertentu tidak tersedia, jangan mengarang.
 Sesuaikan CTA dengan Objective.
 
 Awareness:
-→ Save / Share / Comment
+→ Save / Share / Comment (pakai bahasa save-bait "Simpan buat nanti" / share-bait "Kirim ke teman yang...")
 
 Education:
-→ Save / Share
+→ Save / Share (pakai bahasa save-bait "Simpan buat nanti")
 
 Engagement:
-→ Comment / Answer
+→ Comment / Answer (wajib pertanyaan terbuka atau "pilih A atau B?", bukan "Setuju?")
 
 Trust:
 → Learn More / Visit Profile
@@ -531,6 +562,18 @@ Nilai setiap post per kriteria berikut (masing-masing /10):
 6. Differentiation
 7. CTA Fit
 8. Platform Fit
+
+## HOOK RUBRIC (adopsi dari content-production skill, Quality Gates + Readability Pass)
+
+Nilai Hook Strength /10 dengan aturan ini:
+
+10: spesifik + ada angka/kontras/klaim berani + relevan audience + maks 15 kata + tanpa cliché
+7-9: spesifik tapi tanpa angka/kontras, atau 16-20 kata
+4-6: generik tapi masih relevan ("Mau ...?", "Tips ...", "Pernah nggak...?")
+0-3: sapaan/cliché/janji kosong ("Halo guys", "Di era digital...", "Solusi terbaik...", "Jangan lupa follow...")
+
+Hook dengan score <=6 WAJIB status REVISE/REJECT, tidak boleh PASS. Tulis alasan spesifik ("hook 22 kata, tanpa angka/kontras" bukan "hook kurang menarik").
+Uji keunikan (adopsi dari hook-writer-sms, Quick self-check): hook yang bisa ditempel ke bisnis lain tanpa diubah = maks 6.
 
 ## SCORE
 
@@ -667,7 +710,8 @@ Perbaiki konten (auto-revise) berdasarkan hasil QC. Hanya perbaiki bagian yang b
 4. Jangan mengarang fakta baru. Jangan menambahkan statistik, testimonial, harga, atau klaim yang tidak tersedia.
 5. Hindari generic opening, AI clichés, filler, dan CTA yang berlebihan.
 6. CTA harus sesuai objective (Save/Share untuk awareness & education, Comment/Answer untuk engagement, Learn More/Visit Profile untuk trust, DM/Buy untuk conversion).
-7. Gunakan schema yang sama dengan Engine 4.
+7. Jika hook yang gagal (adopsi dari content-research-writer skill, Improve Hooks): buat 3 alternatif hook internal (a. pernyataan berani, b. story micro, c. data/angka mengejutkan), lalu pilih 1 terbaik dengan 4 pertanyaan ini: apakah bikin penasaran? apakah janji value jelas? apakah spesifik? apakah cocok audience? Output hanya hook terbaik.
+8. Gunakan schema yang sama dengan Engine 4.
 
 ## OUTPUT JSON SCHEMA
 
@@ -737,7 +781,8 @@ Buat ulang konten (regenerate) untuk day yang gagal QC karena masalah fundamenta
 4. Periksa BATCH_SUMMARIES agar tidak membuat duplikasi baru.
 5. Ikuti brand voice pada BUSINESS_CONTEXT. Jangan mengubah karakter brand.
 6. Jangan mengarang fakta, testimonial, statistik, harga, atau klaim. Jika butuh informasi yang tidak tersedia, jangan dipaksakan.
-7. Gunakan schema yang sama dengan Engine 4.
+7. Untuk hook baru (adopsi dari content-research-writer skill, Improve Hooks): buat 3 alternatif hook internal (a. pernyataan berani, b. story micro, c. data/angka mengejutkan), lalu pilih 1 terbaik dengan 4 pertanyaan ini: apakah bikin penasaran? apakah janji value jelas? apakah spesifik? apakah cocok audience? Output hanya hook terbaik.
+8. Gunakan schema yang sama dengan Engine 4.
 
 ## OUTPUT JSON SCHEMA
 
